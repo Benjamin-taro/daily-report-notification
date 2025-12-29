@@ -1,0 +1,25 @@
+name: LINE Broadcast
+
+on:
+  schedule:
+    # 例：毎日 11:50 UTC（日本時間 20:50）
+    - cron: "50 11 * * *"
+  workflow_dispatch:
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Send broadcast
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+        run: |
+          python send_line_broadcast.py
