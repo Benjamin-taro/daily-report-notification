@@ -20,6 +20,8 @@ jobs:
 
       - name: Send broadcast
         env:
-          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+            LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+            LINE_TEST_MODE: "true"
+            TEST_LINE_USER_ID: ${{ secrets.TEST_LINE_USER_ID }}
         run: |
           python daily-report-notification.py
