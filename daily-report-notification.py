@@ -30,6 +30,14 @@ WEATHERCODE_JA = {
     81: "にわか雨（中）",
     82: "にわか雨（強）",
 }
+
+CITIES = [
+    {"name": "横浜", "lat": 35.4437, "lon": 139.6380},
+    {"name": "松山", "lat": 33.8392, "lon": 132.7657},
+    {"name": "鹿児島", "lat": 31.5966, "lon": 130.5571},
+    {"name": "秋田", "lat": 39.7186, "lon": 140.1024},
+]
+
 def get_tomorrow_morning_forecast_open_meteo(
     lat: float,
     lon: float,
@@ -85,21 +93,41 @@ def get_tomorrow_morning_forecast_open_meteo(
 
 def build_text_message() -> dict:
     now_jst = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Tokyo"))
-    date_str = now_jst.strftime("%Y-%m-%d")
+    today_str = now_jst.strftime("%Y-%m-%d")
     time_str = now_jst.strftime("%H:%M")
 
-    # 例：東京（必要ならあなたの地域の緯度経度に変更）
-    forecast = get_tomorrow_morning_forecast_open_meteo(lat=35.6812, lon=139.7671, target_hour=7)
+    tomorrow_date = (now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    pop_text = f"{forecast['precip_prob']}%" if forecast["precip_prob"] is not None else "不明"
+    forecast_lines = []
+
+    for city in CITIES:
+        forecast = get_tomorrow_morning_forecast_open_meteo(
+            lat=city["lat"],
+            lon=city["lon"],
+            target_hour=7,  # 朝7時
+        )
+
+        pop_text = (
+            f"{forecast['precip_prob']}%"
+            if forecast["precip_prob"] is not None
+            else "不明"
+        )
+
+        forecast_lines.append(
+            f"【{city['name']}】\n"
+            f"天気：{forecast['weather']}\n"
+            f"気温：{forecast['temp']:.1f}℃\n"
+            f"降水確率：{pop_text}"
+        )
+
+    forecast_block = "\n\n".join(forecast_lines)
 
     text = (
         "こんばんは！\n\n"
-        f"{date_str} {time_str}（日本時間）\n\n"
-        f"🌅 明日の朝 {forecast['time'][-5:]} の天気\n"
-        f"天気：{forecast['weather']}\n"
-        f"気温：{forecast['temp']:.1f}℃\n"
-        f"降水確率：{pop_text}\n\n"
+        "今日も一日お疲れ様でした🙌\n\n"
+        f"{today_str} {time_str}（日本時間）\n\n"
+        f"🌅 明日（{tomorrow_date}）の朝 07:00 の天気\n\n"
+        f"{forecast_block}\n\n"
         "✍️ 今日の日報を投稿しましょう！"
     )
 
