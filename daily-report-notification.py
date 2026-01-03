@@ -1,6 +1,7 @@
 import os
 import json
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 import urllib.request
 import urllib.error
@@ -68,6 +69,20 @@ CITIES = [
 # ===============================
 # Weather fetch
 # ===============================
+
+def fetch_json_with_retry(url: str, timeout: int = 30, retries: int = 3, backoff_sec: float = 1.5) -> dict:
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as res:
+                return json.loads(res.read().decode("utf-8"))
+        except Exception as e:
+            last_err = e
+            wait = backoff_sec ** (attempt - 1)
+            print(f"[weather] fetch failed attempt={attempt}/{retries} err={e} -> retry in {wait:.1f}s", file=sys.stderr)
+            time.sleep(wait)
+    raise last_err
+
 def get_tomorrow_morning_forecast_open_meteo(lat: float, lon: float, target_hour: int = 7) -> dict:
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -76,8 +91,7 @@ def get_tomorrow_morning_forecast_open_meteo(lat: float, lon: float, target_hour
         "&timezone=Asia%2FTokyo"
     )
 
-    with urllib.request.urlopen(url, timeout=20) as res:
-        data = json.loads(res.read().decode("utf-8"))
+    data = fetch_json_with_retry(url, timeout=30, retries=3, backoff_sec=2.0)
 
     hourly = data["hourly"]
     times = hourly["time"]
@@ -106,6 +120,7 @@ def get_tomorrow_morning_forecast_open_meteo(lat: float, lon: float, target_hour
         "code": code,
     }
 
+
 # ===============================
 # Forecast aggregation
 # ===============================
@@ -115,20 +130,30 @@ def get_tomorrow_forecasts(cities: list[dict], target_hour: int = 7) -> dict:
 
     items = []
     for city in cities:
-        f = get_tomorrow_morning_forecast_open_meteo(city["lat"], city["lon"], target_hour)
-        items.append({
-            "name": city["name"],
-            "icon": weather_icon_from_code(f["code"]),
-            "weather": f["weather"],
-            "temp": f["temp"],
-            "pop": f["precip_prob"],
-        })
+        try:
+            f = get_tomorrow_morning_forecast_open_meteo(city["lat"], city["lon"], target_hour)
+            items.append({
+                "name": city["name"],
+                "icon": weather_icon_from_code(f["code"]),
+                "weather": f["weather"],
+                "temp": f["temp"],
+                "pop": f["precip_prob"],
+                "ok": True,
+            })
+        except Exception as e:
+            # 失敗しても全体を止めない
+            print(f"[weather] failed city={city['name']} err={e}", file=sys.stderr)
+            items.append({
+                "name": city["name"],
+                "icon": "❓",
+                "weather": "取得失敗",
+                "temp": 0.0,
+                "pop": None,
+                "ok": False,
+            })
 
-    return {
-        "date": tomorrow_date,
-        "time": f"{target_hour:02d}:00",
-        "items": items,
-    }
+    return {"date": tomorrow_date, "time": f"{target_hour:02d}:00", "items": items}
+
 
 def format_forecast_block(forecasts: dict) -> str:
     lines = []
@@ -149,18 +174,32 @@ def build_text_message() -> dict:
     today = now_jst.strftime("%Y-%m-%d %H:%M")
 
     forecasts = get_tomorrow_forecasts(CITIES, target_hour=7)
-    forecast_block = format_forecast_block(forecasts)
+
+    # 全都市失敗なら、天気セクションを軽くする
+    any_ok = any(item.get("ok") for item in forecasts["items"])
+
+    if any_ok:
+        forecast_block = format_forecast_block(forecasts)
+        weather_section = (
+            f"🌅 明日（{forecasts['date']}）の朝 {forecasts['time']} の天気\n\n"
+            f"{forecast_block}\n\n"
+        )
+    else:
+        weather_section = (
+            f"🌅 明日（{forecasts['date']}）の朝 {forecasts['time']} の天気\n\n"
+            "（天気情報の取得に失敗しました🙏）\n\n"
+        )
 
     text = (
         "こんばんは！\n\n"
         "今日も一日お疲れ様でした🙌\n\n"
         f"{today}（日本時間）\n\n"
-        f"🌅 明日（{forecasts['date']}）の朝 {forecasts['time']} の天気\n\n"
-        f"{forecast_block}\n\n"
+        f"{weather_section}"
         "✍️ 今日の日報を投稿しましょう！"
     )
 
     return {"type": "text", "text": text}
+
 
 # ===============================
 # LINE send helpers
