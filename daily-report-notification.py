@@ -162,7 +162,7 @@ def format_forecast_block(forecasts: dict) -> str:
         lines.append(
             f"【{item['name']}】\n"
             f"{item['icon']} {item['weather']}\n"
-            f"🌡 {item['temp']:.1f}℃ / ☔ {pop}"
+            f"気温: {item['temp']:.1f}℃ / 降水確率: {pop}"
         )
     return "\n\n".join(lines)
 
