@@ -60,7 +60,7 @@ def weather_icon_from_code(code: int) -> str:
 # ===============================
 
 def fetch_json_with_retry(url: str, timeout: int = 30, retries: int = 3, backoff_sec: float = 1.5) -> dict:
-    """リトライ機能付きJSON取得"""
+    """リトライ機能付きJSON取得。429 のときは待機を長めにしてレート制限の回復を待つ。"""
     last_err = None
     for attempt in range(1, retries + 1):
         try:
@@ -68,13 +68,23 @@ def fetch_json_with_retry(url: str, timeout: int = 30, retries: int = 3, backoff
                 return json.loads(res.read().decode("utf-8"))
         except Exception as e:
             last_err = e
+            # 429 Too Many Requests のときは長めに待つ（制限窓のリセットを待つ）
             wait = backoff_sec ** (attempt - 1)
+            if "429" in str(e):
+                wait = max(wait, 60)
             print(f"[weather] fetch failed attempt={attempt}/{retries} err={e} -> retry in {wait:.1f}s", file=sys.stderr)
             time.sleep(wait)
     raise last_err
 
 # 0:00-7:59 は「翌日（本日）」= その日の9-21時、8:00以降は「翌日」= 翌日の9-21時
 MORNING_CUTOFF_HOUR = 8
+
+# 天気APIのレート制限対策：同一条件の結果を短時間キャッシュ（秒）
+WEATHER_CACHE_TTL_SECONDS = 300
+
+_weather_cache: dict = {}
+_weather_cache_time: dict = {}
+
 
 def _target_date_and_header(tz_str: str) -> tuple:
     """その地点の現在時刻から、表示する日付と冒頭文言を決める。
@@ -95,10 +105,18 @@ def get_tomorrow_weather_9_to_21(
     timezone_str: str = "Asia/Tokyo",
 ) -> tuple[list, str, str]:
     """その地点の現在時刻に応じて、本日または翌日の 9,12,15,18,21 時の天気を取得。
+    同一 (lat, lon, timezone, 対象日) は WEATHER_CACHE_TTL_SECONDS の間キャッシュしてAPI呼び出しを削減。
     Returns:
         (forecasts, date_label, header_label)
         date_label は日付文字列（表示用）、header_label は "翌日（本日）" または "翌日"
     """
+    target_date, header_label = _target_date_and_header(timezone_str)
+    cache_key = (round(lat, 4), round(lon, 4), timezone_str, target_date.isoformat())
+    now_ts = time.monotonic()
+    if cache_key in _weather_cache and (now_ts - _weather_cache_time.get(cache_key, 0)) < WEATHER_CACHE_TTL_SECONDS:
+        cached = _weather_cache[cache_key]
+        return cached[0], cached[1], cached[2]
+
     url = (
         "https://api.open-meteo.com/v1/forecast"
         f"?latitude={lat}&longitude={lon}"
@@ -113,7 +131,6 @@ def get_tomorrow_weather_9_to_21(
     pops = hourly.get("precipitation_probability", [])
     codes = hourly["weathercode"]
 
-    target_date, header_label = _target_date_and_header(timezone_str)
     target_hours = (9, 12, 15, 18, 21)
     forecasts = []
     for h in target_hours:
@@ -146,6 +163,8 @@ def get_tomorrow_weather_9_to_21(
         })
     WEEKDAY_JA = ("月", "火", "水", "木", "金", "土", "日")
     date_label = f"{target_date.year}年{target_date.month}月{target_date.day}日({WEEKDAY_JA[target_date.weekday()]})"
+    _weather_cache[cache_key] = (forecasts, date_label, header_label)
+    _weather_cache_time[cache_key] = now_ts
     return forecasts, date_label, header_label
 
 
