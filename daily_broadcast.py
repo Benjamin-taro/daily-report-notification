@@ -1,60 +1,21 @@
 import os
 import json
 import sys
-import time
 from datetime import datetime, timezone, timedelta
-import urllib.request
-import urllib.error
 from zoneinfo import ZoneInfo  # Python 3.9+
+import urllib.request
+
+# weather.pyから天気取得ロジックをインポート
+from weather import (
+    weather_icon_from_code,
+    get_tomorrow_morning_forecast_open_meteo,
+)
 
 # ===============================
 # LINE API
 # ===============================
 LINE_BROADCAST_URL = "https://api.line.me/v2/bot/message/broadcast"
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
-
-# ===============================
-# Weather mapping
-# ===============================
-WEATHERCODE_JA = {
-    0: "快晴",
-    1: "晴れ",
-    2: "一部くもり",
-    3: "くもり",
-    45: "霧",
-    48: "着氷性の霧",
-    51: "霧雨（弱）",
-    53: "霧雨（中）",
-    55: "霧雨（強）",
-    61: "雨（弱）",
-    63: "雨（中）",
-    65: "雨（強）",
-    71: "雪（弱）",
-    73: "雪（中）",
-    75: "雪（強）",
-    80: "にわか雨（弱）",
-    81: "にわか雨（中）",
-    82: "にわか雨（強）",
-}
-
-def weather_icon_from_code(code: int) -> str:
-    if code == 0:
-        return "☀️"
-    if code in (1, 2):
-        return "🌤️"
-    if code == 3:
-        return "☁️"
-    if code in (45, 48):
-        return "🌫️"
-    if 51 <= code <= 57:
-        return "🌦️"
-    if 61 <= code <= 67 or 80 <= code <= 82:
-        return "☂️"
-    if 71 <= code <= 77 or 85 <= code <= 86:
-        return "❄️"
-    if code in (95, 96, 99):
-        return "⛈️"
-    return "🌡️"
 
 # ===============================
 # Cities
@@ -65,61 +26,6 @@ CITIES = [
     {"name": "鹿児島", "lat": 31.5966, "lon": 130.5571},
     {"name": "秋田", "lat": 39.7186, "lon": 140.1024},
 ]
-
-# ===============================
-# Weather fetch
-# ===============================
-
-def fetch_json_with_retry(url: str, timeout: int = 30, retries: int = 3, backoff_sec: float = 1.5) -> dict:
-    last_err = None
-    for attempt in range(1, retries + 1):
-        try:
-            with urllib.request.urlopen(url, timeout=timeout) as res:
-                return json.loads(res.read().decode("utf-8"))
-        except Exception as e:
-            last_err = e
-            wait = backoff_sec ** (attempt - 1)
-            print(f"[weather] fetch failed attempt={attempt}/{retries} err={e} -> retry in {wait:.1f}s", file=sys.stderr)
-            time.sleep(wait)
-    raise last_err
-
-def get_tomorrow_morning_forecast_open_meteo(lat: float, lon: float, target_hour: int = 7) -> dict:
-    url = (
-        "https://api.open-meteo.com/v1/forecast"
-        f"?latitude={lat}&longitude={lon}"
-        "&hourly=temperature_2m,precipitation_probability,weathercode"
-        "&timezone=Asia%2FTokyo"
-    )
-
-    data = fetch_json_with_retry(url, timeout=30, retries=3, backoff_sec=2.0)
-
-    hourly = data["hourly"]
-    times = hourly["time"]
-    temps = hourly["temperature_2m"]
-    pops = hourly.get("precipitation_probability")
-    codes = hourly["weathercode"]
-
-    now_jst = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Tokyo"))
-    tomorrow = (now_jst + timedelta(days=1)).date()
-    target_time = f"{tomorrow.isoformat()}T{target_hour:02d}:00"
-
-    try:
-        idx = times.index(target_time)
-    except ValueError:
-        candidates = [i for i, t in enumerate(times) if t.startswith(tomorrow.isoformat())]
-        if not candidates:
-            raise RuntimeError("No forecast data for tomorrow")
-        idx = candidates[0]
-
-    code = int(codes[idx])
-    return {
-        "time": times[idx],
-        "temp": float(temps[idx]),
-        "precip_prob": int(pops[idx]) if pops and pops[idx] is not None else None,
-        "weather": WEATHERCODE_JA.get(code, f"天気コード:{code}"),
-        "code": code,
-    }
-
 
 # ===============================
 # Forecast aggregation

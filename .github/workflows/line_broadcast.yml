@@ -24,4 +24,4 @@ jobs:
             # LINE_TEST_MODE: "true"
             # TEST_LINE_USER_ID: ${{ secrets.TEST_LINE_USER_ID }}
         run: |
-          python daily-report-notification.py
+          python daily_broadcast.py
