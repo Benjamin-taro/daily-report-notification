@@ -5,6 +5,11 @@ on:
     # 例：毎日 11:55 UTC（日本時間 20:55）
     - cron: "55 11 * * *"
   workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "テストモード（自分にだけ送る）"
+        type: boolean
+        default: true
 
 jobs:
   send:
@@ -21,7 +26,7 @@ jobs:
       - name: Send broadcast
         env:
             LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-            # LINE_TEST_MODE: "true"
-            # TEST_LINE_USER_ID: ${{ secrets.TEST_LINE_USER_ID }}
+            LINE_TEST_MODE: ${{ inputs.test_mode || 'false' }}
+            TEST_LINE_USER_ID: ${{ secrets.TEST_LINE_USER_ID }}
         run: |
           python daily_broadcast.py
