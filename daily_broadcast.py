@@ -1,21 +1,14 @@
 import os
 import json
 import sys
-from datetime import datetime, timezone, timedelta
+import uuid
+from datetime import date, datetime, timezone, timedelta
 from zoneinfo import ZoneInfo  # Python 3.9+
-import urllib.request
 
-# weather.pyから天気取得ロジックをインポート
-from weather import (
-    weather_icon_from_code,
-    get_tomorrow_morning_forecast_open_meteo,
-)
-
-# ===============================
-# LINE API
-# ===============================
-LINE_BROADCAST_URL = "https://api.line.me/v2/bot/message/broadcast"
-LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
+from comment import generate_comment
+from line_client import LineClient, build_text_message
+from tz import WEEKDAY_JA, format_date_ja
+from weather import get_daily_forecasts
 
 # ===============================
 # Cities
@@ -26,130 +19,101 @@ CITIES = [
     {"name": "さいたま", "lat": 35.8617, "lon": 139.6455},
 ]
 
+JST = ZoneInfo("Asia/Tokyo")
+
 # ===============================
 # Forecast aggregation
 # ===============================
-def get_tomorrow_forecasts(cities: list[dict], target_hour: int = 7) -> dict:
-    now_jst = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Tokyo"))
-    tomorrow_date = (now_jst + timedelta(days=1)).strftime("%Y-%m-%d")
+def get_tomorrow_forecasts(cities: list[dict], target_date: date) -> list[dict]:
+    """各都市の target_date（現地の日付）の予報を返す。取得できなかった都市は含めない。"""
+    try:
+        results = get_daily_forecasts([(c["lat"], c["lon"]) for c in cities], target_date)
+    except Exception as e:
+        # 失敗しても全体を止めない
+        print(f"[weather] failed err={e}", file=sys.stderr)
+        return []
 
-    items = []
-    for city in cities:
-        try:
-            f = get_tomorrow_morning_forecast_open_meteo(city["lat"], city["lon"], target_hour)
-            items.append({
-                "name": city["name"],
-                "icon": weather_icon_from_code(f["code"]),
-                "weather": f["weather"],
-                "temp": f["temp"],
-                "pop": f["precip_prob"],
-                "ok": True,
-            })
-        except Exception as e:
-            # 失敗しても全体を止めない
-            print(f"[weather] failed city={city['name']} err={e}", file=sys.stderr)
-            items.append({
-                "name": city["name"],
-                "icon": "❓",
-                "weather": "取得失敗",
-                "temp": 0.0,
-                "pop": None,
-                "ok": False,
-            })
-
-    return {"date": tomorrow_date, "time": f"{target_hour:02d}:00", "items": items}
-
-
-def format_forecast_block(forecasts: dict) -> str:
-    lines = []
-    for item in forecasts["items"]:
-        pop = f"{item['pop']}%" if item["pop"] is not None else "不明"
-        lines.append(
-            f"【{item['name']}】\n"
-            f"{item['icon']} {item['weather']}\n"
-            f"気温: {item['temp']:.1f}℃ / 降水確率: {pop}"
-        )
-    return "\n\n".join(lines)
+    forecasts = []
+    for city, f in zip(cities, results):
+        if f is None:
+            print(f"[weather] no data city={city['name']} date={target_date}", file=sys.stderr)
+            continue
+        forecasts.append({"name": city["name"], **f})
+    return forecasts
 
 # ===============================
 # Message builder
 # ===============================
-def build_text_message() -> dict:
-    now_jst = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Tokyo"))
-    today = now_jst.strftime("%Y-%m-%d %H:%M")
+def _short_date(d: date) -> str:
+    return f"{d.month}/{d.day}({WEEKDAY_JA[d.weekday()]})"
 
-    forecasts = get_tomorrow_forecasts(CITIES, target_hour=7)
 
-    # 全都市失敗なら、天気セクションを軽くする
-    any_ok = any(item.get("ok") for item in forecasts["items"])
-
-    if any_ok:
-        forecast_block = format_forecast_block(forecasts)
-        weather_section = (
-            f"🌅 明日（{forecasts['date']}）の朝 {forecasts['time']} の天気\n\n"
-            f"{forecast_block}\n\n"
+def format_forecast_block(forecasts: list[dict]) -> str:
+    lines = []
+    for f in forecasts:
+        pop = f"{f['precip_prob']}%" if f["precip_prob"] is not None else "不明"
+        lines.append(
+            f"【{f['name']}】\n"
+            f"{f['icon']} {f['weather']}\n"
+            f"最高 {f['temp_max']:.0f}℃ / 最低 {f['temp_min']:.0f}℃ / 降水確率 {pop}"
         )
+    return "\n\n".join(lines)
+
+
+def build_message() -> dict:
+    now_jst = datetime.now(timezone.utc).astimezone(JST)
+    target_date = (now_jst + timedelta(days=1)).date()
+    forecasts = get_tomorrow_forecasts(CITIES, target_date)
+
+    sections = [
+        "こんばんは！",
+        "今日も一日お疲れ様でした🙌",
+        f"{now_jst.strftime('%Y-%m-%d %H:%M')}（日本時間）",
+        f"🌅 明日 {_short_date(target_date)} の天気",
+    ]
+    if forecasts:
+        sections.append(format_forecast_block(forecasts))
+        comment = generate_comment(format_date_ja(target_date), forecasts)
+        if comment:
+            sections.append(comment)
     else:
-        weather_section = (
-            f"🌅 明日（{forecasts['date']}）の朝 {forecasts['time']} の天気\n\n"
-            "（天気情報の取得に失敗しました🙏）\n\n"
-        )
+        sections.append("（天気情報の取得に失敗しました🙏）")
+    sections.append("✍️ 今日の日報を投稿しましょう！")
 
-    text = (
-        "こんばんは！\n\n"
-        "今日も一日お疲れ様でした🙌\n\n"
-        f"{today}（日本時間）\n\n"
-        f"{weather_section}"
-        "✍️ 今日の日報を投稿しましょう！"
-    )
+    return build_text_message("\n\n".join(sections))
 
-    return {"type": "text", "text": text}
-
-
-# ===============================
-# LINE send helpers
-# ===============================
-def _post_json(url: str, token: str, payload: dict) -> None:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-    )
-
-    with urllib.request.urlopen(req, timeout=20) as res:
-        print(f"OK: {res.status}")
-
-def send_broadcast(token: str, messages: list[dict]) -> None:
-    _post_json(LINE_BROADCAST_URL, token, {"messages": messages})
-
-def send_push(token: str, user_id: str, messages: list[dict]) -> None:
-    _post_json(LINE_PUSH_URL, token, {"to": user_id, "messages": messages})
 
 # ===============================
 # Entry point
 # ===============================
 def main():
+    if "--dry-run" in sys.argv[1:]:
+        # 送信せずにメッセージの中身だけ確認する
+        print(json.dumps([build_message()], ensure_ascii=False, indent=2))
+        return
+
     token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
     if not token:
         raise RuntimeError("Missing LINE_CHANNEL_ACCESS_TOKEN")
+    client = LineClient(token)
 
     test_mode = os.environ.get("LINE_TEST_MODE", "").lower() in ("true", "1", "yes")
-    messages = [build_text_message()]
+    messages = [build_message()]
 
     if test_mode:
         user_id = os.environ.get("TEST_LINE_USER_ID")
         if not user_id:
             raise RuntimeError("Missing TEST_LINE_USER_ID")
-        send_push(token, user_id, messages)
+        client.send_push(user_id, messages)
         print("TEST mode: sent to yourself")
     else:
-        send_broadcast(token, messages)
-        print("PROD mode: broadcast sent")
+        # 日付（日本時間）から決まるキーを付けて、同じ日の2回目以降の配信を LINE 側で弾いてもらう
+        today_jst = datetime.now(timezone.utc).astimezone(JST).date()
+        retry_key = str(uuid.uuid5(uuid.NAMESPACE_URL, f"daily-report-notification/{today_jst.isoformat()}"))
+        if client.send_broadcast(messages, retry_key=retry_key):
+            print("PROD mode: broadcast sent")
+        else:
+            print(f"PROD mode: already sent today ({today_jst}), skipped")
 
 if __name__ == "__main__":
     main()

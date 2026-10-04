@@ -1,4 +1,3 @@
-import os
 import json
 import urllib.request
 import urllib.error
@@ -10,29 +9,38 @@ LINE_BROADCAST_URL = "https://api.line.me/v2/bot/message/broadcast"
 LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 
+
+class LineApiError(RuntimeError):
+    """LINE API がエラー応答を返した"""
+
+    def __init__(self, status: int, detail: str):
+        super().__init__(f"LINE API error: status={status} detail={detail}")
+        self.status = status
+
+
 class LineClient:
     """LINE Messaging API クライアント"""
-    
+
     def __init__(self, access_token: str):
         self.access_token = access_token
-    
-    def _post_json(self, url: str, payload: dict) -> None:
+
+    def _post_json(self, url: str, payload: dict, retry_key: str = None) -> None:
         """JSONデータをPOST送信"""
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self.access_token}",
-                "Content-Type": "application/json",
-            },
-        )
-        
-        with urllib.request.urlopen(req, timeout=20) as res:
-            if res.status != 200:
-                raise RuntimeError(f"LINE API error: status={res.status}")
-    
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+        if retry_key:
+            headers["X-Line-Retry-Key"] = retry_key
+        req = urllib.request.Request(url, data=data, method="POST", headers=headers)
+
+        try:
+            with urllib.request.urlopen(req, timeout=20):
+                pass
+        except urllib.error.HTTPError as e:
+            raise LineApiError(e.code, e.read().decode("utf-8", errors="replace")) from e
+
     def send_reply(self, reply_token: str, messages: list[dict]) -> None:
         """Reply APIでメッセージを返信"""
         payload = {
@@ -40,7 +48,7 @@ class LineClient:
             "messages": messages
         }
         self._post_json(LINE_REPLY_URL, payload)
-    
+
     def send_push(self, user_id: str, messages: list[dict]) -> None:
         """Push APIでメッセージを送信"""
         payload = {
@@ -48,13 +56,24 @@ class LineClient:
             "messages": messages
         }
         self._post_json(LINE_PUSH_URL, payload)
-    
-    def send_broadcast(self, messages: list[dict]) -> None:
-        """Broadcast APIでメッセージを配信"""
+
+    def send_broadcast(self, messages: list[dict], retry_key: str = None) -> bool:
+        """Broadcast APIでメッセージを配信。
+
+        retry_key（UUID）を渡すと、同じキーの配信は24時間のあいだ LINE 側で1回に抑えられる。
+        Returns:
+            配信したら True。同じ retry_key ですでに配信済みだったら False。
+        """
         payload = {
             "messages": messages
         }
-        self._post_json(LINE_BROADCAST_URL, payload)
+        try:
+            self._post_json(LINE_BROADCAST_URL, payload, retry_key=retry_key)
+        except LineApiError as e:
+            if retry_key and e.status == 409:
+                return False
+            raise
+        return True
 
 def build_text_message(text: str) -> dict:
     """テキストメッセージを作成"""

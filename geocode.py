@@ -36,7 +36,7 @@ def search_place(query: str, count: int = 5, language: str = "ja") -> List[Dict[
     url = f"{GEOCODE_URL}?{qs}"
 
     try:
-        data = fetch_json_with_retry(url, timeout=10, retries=2)
+        data = fetch_json_with_retry(url, timeout=10, retries=2, rate_limit_wait_sec=2)
     except Exception:
         return []
 

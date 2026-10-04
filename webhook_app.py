@@ -4,13 +4,14 @@ import hashlib
 import base64
 from typing import List, Dict, Any
 from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 import json
 
 from line_client import LineClient, build_text_message, build_quick_reply_message, build_postback_action
 from state_store import state_store
-from weather import get_tomorrow_weather_9_to_21, weather_icon_from_code
-from tz import calculate_timezone_difference, get_current_time_in_timezone, format_datetime_ja
+from weather import get_tomorrow_weather_9_to_21
+from tz import format_timezone_difference, format_datetime_ja
 from geocode import resolve_place
 
 app = FastAPI()
@@ -29,6 +30,8 @@ line_client = LineClient(LINE_CHANNEL_ACCESS_TOKEN)
 
 def verify_signature(body: bytes, signature: str) -> bool:
     """LINE Webhookの署名を検証"""
+    if not signature:
+        return False
     hash_value = hmac.new(
         LINE_CHANNEL_SECRET.encode("utf-8"),
         body,
@@ -71,6 +74,30 @@ def handle_postback(user_id: str, data: str, reply_token: str):
         })
         message = build_text_message("地名や郵便番号を入力するか、位置情報を送ってください（例：札幌、Osaka、NYC）")
         line_client.send_reply(reply_token, [message])
+
+def reply_weather(user_id: str, reply_token: str, lat: float, lon: float, place_label: str, extra_lines: List[str] = ()):
+    """その地点の天気を取得して返信する"""
+    try:
+        forecasts, date_label, header_label = get_tomorrow_weather_9_to_21(lat, lon)
+        lines = [
+            f"こちら{header_label}の天気です。",
+            f"【{date_label}｜{place_label}の天気】",
+            *extra_lines,
+        ]
+        for f in forecasts:
+            pop_str = f"{f['precip_prob']}%" if f['precip_prob'] is not None else "不明"
+            lines.append(f"{f['time']} {f['icon']} {f['weather']} 気温: {f['temp']:.1f}℃ / 降水確率: {pop_str}")
+        result_text = "\n".join(lines)
+        result_text += "\n\nもう一度検索する場合は「メニュー」と入力してください。"
+        
+        message = build_text_message(result_text)
+        line_client.send_reply(reply_token, [message])
+        state_store.clear_state(user_id)
+    
+    except Exception as e:
+        message = build_text_message(f"天気情報の取得に失敗しました: {str(e)}")
+        line_client.send_reply(reply_token, [message])
+        state_store.clear_state(user_id)
 
 def handle_text_message(user_id: str, text: str, reply_token: str):
     """テキストメッセージを処理"""
@@ -128,7 +155,7 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
             from_tz = from_place["timezone"]
             to_tz = to_place["timezone"]
             
-            hours_diff, diff_str = calculate_timezone_difference(from_tz, to_tz)
+            diff_str = format_timezone_difference(from_tz, to_tz)
             time_yours = format_datetime_ja(from_tz)
             time_dest = format_datetime_ja(to_tz)
             
@@ -157,28 +184,7 @@ def handle_text_message(user_id: str, text: str, reply_token: str):
             line_client.send_reply(reply_token, [message])
             return
         
-        try:
-            forecasts, date_label, header_label = get_tomorrow_weather_9_to_21(
-                place["lat"], place["lon"], place["timezone"]
-            )
-            lines = [
-                f"こちら{header_label}の天気です。",
-                f"【{date_label}｜{place['display_name']}の天気】",
-            ]
-            for f in forecasts:
-                pop_str = f"{f['precip_prob']}%" if f['precip_prob'] is not None else "不明"
-                lines.append(f"{f['time']} {f['icon']} {f['weather']} 気温: {f['temp']:.1f}℃ / 降水確率: {pop_str}")
-            result_text = "\n".join(lines)
-            result_text += "\n\nもう一度検索する場合は「メニュー」と入力してください。"
-            
-            message = build_text_message(result_text)
-            line_client.send_reply(reply_token, [message])
-            state_store.clear_state(user_id)
-        
-        except Exception as e:
-            message = build_text_message(f"天気情報の取得に失敗しました: {str(e)}")
-            line_client.send_reply(reply_token, [message])
-            state_store.clear_state(user_id)
+        reply_weather(user_id, reply_token, place["lat"], place["lon"], place["display_name"])
 
 def handle_location_message(user_id: str, latitude: float, longitude: float, reply_token: str):
     """位置情報メッセージを処理"""
@@ -189,43 +195,12 @@ def handle_location_message(user_id: str, latitude: float, longitude: float, rep
         handle_menu_command(user_id, reply_token)
         return
     
-    # 天気を取得
-    try:
-        # 位置情報からタイムゾーンを推定（簡易版：緯度経度からは正確なタイムゾーンを取得できないため、デフォルトを使用）
-        tz = "Asia/Tokyo"  # 簡易実装
-        forecasts, date_label, header_label = get_tomorrow_weather_9_to_21(latitude, longitude, tz)
-        lines = [
-            f"こちら{header_label}の天気です。",
-            f"【{date_label}｜位置情報の天気】",
-            f"緯度: {latitude:.4f}, 経度: {longitude:.4f}",
-        ]
-        for f in forecasts:
-            pop_str = f"{f['precip_prob']}%" if f['precip_prob'] is not None else "不明"
-            lines.append(f"{f['time']} {f['icon']} {f['weather']} 気温: {f['temp']:.1f}℃ / 降水確率: {pop_str}")
-        result_text = "\n".join(lines)
-        result_text += "\n\nもう一度検索する場合は「メニュー」と入力してください。"
-        
-        message = build_text_message(result_text)
-        line_client.send_reply(reply_token, [message])
-        state_store.clear_state(user_id)
-    
-    except Exception as e:
-        message = build_text_message(f"天気情報の取得に失敗しました: {str(e)}")
-        line_client.send_reply(reply_token, [message])
-        state_store.clear_state(user_id)
+    reply_weather(user_id, reply_token, latitude, longitude, "位置情報", [
+        f"緯度: {latitude:.4f}, 経度: {longitude:.4f}",
+    ])
 
-@app.post("/webhook")
-async def webhook(request: Request, x_line_signature: str = Header(None)):
-    """LINE Webhookエンドポイント"""
-    body = await request.body()
-    
-    # 署名検証
-    if not verify_signature(body, x_line_signature):
-        raise HTTPException(status_code=401, detail="Invalid signature")
-    
-    data = json.loads(body.decode("utf-8"))
-    events = data.get("events", [])
-    
+def handle_events(events: List[Dict[str, Any]]):
+    """Webhookイベントを順に処理"""
     for event in events:
         event_type = event.get("type")
         reply_token = event.get("replyToken")
@@ -254,6 +229,19 @@ async def webhook(request: Request, x_line_signature: str = Header(None)):
         elif event_type == "postback":
             postback_data = event.get("postback", {}).get("data", "")
             handle_postback(user_id, postback_data, reply_token)
+
+@app.post("/webhook")
+async def webhook(request: Request, x_line_signature: str = Header(None)):
+    """LINE Webhookエンドポイント"""
+    body = await request.body()
+    
+    # 署名検証
+    if not verify_signature(body, x_line_signature):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+    
+    data = json.loads(body.decode("utf-8"))
+    # ハンドラは外部APIを同期で呼ぶので、イベントループを止めないようスレッドプールで実行する
+    await run_in_threadpool(handle_events, data.get("events", []))
     
     return Response(status_code=200)
 

@@ -3,15 +3,21 @@ name: LINE Broadcast
 on:
   # 本番の起動は cron-job.org から毎日 20:55（日本時間）に workflow_dispatch で行う。
   # GitHub の schedule は数時間遅れたり飛ばされたりするので、下の cron は保険。
-  # 保険の実行は「今日（日本時間）すでに送信済み」または「日本時間 23 時以降」なら送らない
+  # 同じ日の2回目以降の配信は LINE 側が弾く（daily_broadcast.py が日付から決まる X-Line-Retry-Key を付ける）。
+  # 保険の実行が大きく遅れて「日本時間 23 時以降」になった場合は送らない
   schedule:
     - cron: "5 12 * * *"   # 21:05 JST
     - cron: "35 12 * * *"  # 21:35 JST
   workflow_dispatch:
+    inputs:
+      # cron-job.org からの起動は入力なし = 本番配信。手動で確認するときだけ true にする
+      test_mode:
+        description: "テスト送信（TEST_LINE_USER_ID にだけ送る）"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: line-broadcast
@@ -26,26 +32,12 @@ jobs:
 
       - name: Guard (schedule only)
         id: guard
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           if [ "${{ github.event_name }}" != "schedule" ]; then echo "send=true" >> "$GITHUB_OUTPUT"; exit 0; fi
           hour=$(TZ=Asia/Tokyo date +%H)
           if [ "$hour" -ge 23 ] || [ "$hour" -lt 12 ]; then
             echo "日本時間 ${hour} 時：送信時間帯を過ぎているので送らない"; echo "send=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          # 今日（日本時間）の 12 時以降に「Send broadcast」まで成功した実行があれば送らない
-          # （スキップしただけの実行も success になるので、手順単位で確認する）
-          since=$(TZ=Asia/Tokyo date -d "today 12:00" -u +%Y-%m-%dT%H:%M:%SZ)
-          ids=$(gh api "repos/${{ github.repository }}/actions/workflows/line_broadcast.yml/runs?status=success&created=>=${since}&per_page=20" \
-            -q ".workflow_runs[] | select(.id != ${{ github.run_id }}) | .id")
-          for id in $ids; do
-            n=$(gh api "repos/${{ github.repository }}/actions/runs/${id}/jobs" \
-              -q '[.jobs[].steps[] | select(.name == "Send broadcast" and .conclusion == "success")] | length')
-            if [ "${n:-0}" -gt 0 ]; then
-              echo "今日はすでに送信済み（run ${id}）"; echo "send=false" >> "$GITHUB_OUTPUT"; exit 0
-            fi
-          done
           echo "send=true" >> "$GITHUB_OUTPUT"
 
       - name: Setup Python
@@ -54,11 +46,18 @@ jobs:
         with:
           python-version: "3.11"
 
+      # 一言コメントの生成に使う（comment.py）
+      - name: Install Claude Code
+        if: steps.guard.outputs.send == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
       - name: Send broadcast
         if: steps.guard.outputs.send == 'true'
         env:
             LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-            # LINE_TEST_MODE: "true"
-            # TEST_LINE_USER_ID: ${{ secrets.TEST_LINE_USER_ID }}
+            # 未設定・期限切れなら一言コメントなしで配信する
+            CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+            LINE_TEST_MODE: ${{ inputs.test_mode }}
+            TEST_LINE_USER_ID: ${{ secrets.TEST_LINE_USER_ID }}
         run: |
           python daily_broadcast.py
