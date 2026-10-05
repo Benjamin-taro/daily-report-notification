@@ -1,6 +1,6 @@
 # daily-report-notification
 
-毎晩 21 時ごろ（日本時間）に、日報の投稿を促す LINE 通知を配信する。通知には Glasgow・秋田・さいたまの翌日の天気と、Claude が天気から書く一言が付く。
+毎晩 21 時ごろ（日本時間）に、日報の投稿を促す LINE 通知を配信する。通知には Glasgow・秋田・さいたまの翌日の天気と、「明日は何の日」の紹介が付く。
 
 あわせて、LINE のトークで時差計算と天気検索に答える Webhook アプリも含む。
 
@@ -9,7 +9,7 @@
 | ファイル | 役割 |
 | --- | --- |
 | `daily_broadcast.py` | 毎晩の配信。天気とリマインド文を組み立てて送る |
-| `comment.py` | Claude Code を非対話モードで呼び、一言コメントを生成する |
+| `comment.py` | 「明日は何の日」を作る。日本語版ウィキペディアの日付ページを材料に、Claude Code（非対話モード）が 1 つ選んで紹介文を書く |
 | `weather.py` | Open-Meteo から予報を取得する |
 | `line_client.py` | LINE Messaging API のクライアント |
 | `webhook_app.py` | 時差計算・天気検索の Webhook（FastAPI） |
@@ -28,7 +28,7 @@ GitHub Actions の `LINE Broadcast` ワークフローが `daily_broadcast.py` �
 | 名前 | 必須 | 用途 |
 | --- | --- | --- |
 | `LINE_CHANNEL_ACCESS_TOKEN` | 必須 | LINE への配信 |
-| `CLAUDE_CODE_OAUTH_TOKEN` | 任意 | 一言コメントの生成。`claude setup-token` で発行する（Claude のサブスクの枠で動く）。未設定・期限切れ・生成失敗なら、一言なしで配信する |
+| `CLAUDE_CODE_OAUTH_TOKEN` | 任意 | 「明日は何の日」の生成。`claude setup-token` で発行する（Claude のサブスクの枠で動く）。未設定・期限切れ・生成失敗なら、この欄なしで配信する |
 
 ### ローカルでの確認
 
@@ -43,7 +43,7 @@ python daily_broadcast.py --dry-run
 LINE_CHANNEL_ACCESS_TOKEN=... LINE_TEST_MODE=true TEST_LINE_USER_ID=... python daily_broadcast.py
 ```
 
-都市を変えるときは `daily_broadcast.py` の `CITIES` を、一言の口調を変えるときは `comment.py` の `SYSTEM_PROMPT` を編集する。
+都市を変えるときは `daily_broadcast.py` の `CITIES` を、「明日は何の日」の選び方や口調を変えるときは `comment.py` の `SYSTEM_PROMPT` を編集する。
 
 ## Webhook アプリ
 

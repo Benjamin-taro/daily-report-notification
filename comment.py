@@ -1,59 +1,109 @@
 """
-Claude Code（非対話モード）で、日報リマインドに添える一言を生成する。
+日報リマインドに添える「明日は何の日」を作る。
+材料は日本語版ウィキペディアの日付ページ（記念日・年中行事／できごと）から取り、
+Claude Code（非対話モード）にその中から1つ選んで紹介文を書かせる。
 GitHub Actions では CLAUDE_CODE_OAUTH_TOKEN（`claude setup-token` で発行）で認証し、サブスクの枠で動く。
-claude コマンドがない、または生成に失敗したときは None を返し、配信は一言なしで続ける。
+材料が取れない、claude コマンドがない、生成に失敗した、のいずれでも None を返し、配信はこの欄なしで続ける。
 """
 import json
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
+import urllib.request
+from datetime import date
 from typing import Optional
 
 MODEL = "sonnet"
 TIMEOUT_SECONDS = 90
 
+WIKIPEDIA_API_URL = "https://ja.wikipedia.org/w/api.php"
+# ウィキペディアは User-Agent のないリクエストを拒否する
+USER_AGENT = "daily-report-notification/1.0 (https://github.com/Benjamin-taro/daily-report-notification)"
+# 材料にする節と、Claude に渡す最大文字数
+SECTIONS = {"記念日・年中行事": 3000, "できごと": 4000}
+
 SYSTEM_PROMPT = """\
-日報の投稿を促すLINE通知に添える一言を書いてください。
+親しい友人3人に毎晩届くLINE通知の「明日は何の日」欄を書いてください。
 
-読むのは Glasgow・秋田・さいたまに住む親しい3人です。通知は日本時間の21時ごろに届くので、\
-日本の2人は一日の終わりに、Glasgow の1人は現地の昼ごろに読みます。
+渡される材料（日本語版ウィキペディアのその日のページ）から、いちばん「へえ」と思える、\
+誰かに話したくなるものをひとつだけ選びます。記念日でも、過去のできごとでも構いません。\
+戦争・事故・災害・事件のような重い話題は選びません。語呂合わせの記念日は、こじつけ具合が面白いものなら歓迎です。
 
-渡される明日の日付と各都市の天気予報から話題をひとつ選び、友人に話しかける口調で、\
-60文字以内の1文にまとめてください。都市どうしの違いや、曜日・季節に触れるのも歓迎です。
-予報の数字は一言のすぐ上に載っているので、3都市の天気を並べ直すのではなく、\
-いちばん目を引く点ひとつに絞って、感想や声かけにしてください。
+次の2つを、改行で分けて書きます。
 
-出力はその1文だけにしてください。挨拶、日報への言及、「おやすみ」のような時間帯を決めつける言葉は入れません\
-（挨拶と日報の案内は通知の別の部分にあります）。絵文字は使っても1つまでです。"""
+全体を、やわらかい「です・ます」調で書きます。
+
+1行目は事実です。「明日（○月○日）は〜の日です。」のように何の日かを言い切る文で始め、由来をひとこと添えます（70文字以内）。\
+材料に書かれていない事実、年、数字を足してはいけません。
+
+2行目はあなたからのひとことです（50文字以内）。その日にちなんで思いついたことを、隣でふとつぶやくように添えます。\
+中身は、明日やってみたら楽しそうなこと、こうなったらいいなという願い、その日らしい光景の想像、\
+自分ならこうしそうだという打ち明け話など、その日の題材にいちばん合うものを選んでください。少しふざけても構いません。
+
+大事なのは距離感です。読む人は一日を終えて疲れているので、やるかどうかは完全に読む人の自由で、\
+聞き流しても何も困らない、という軽さにします。指示された・急かされた・答えを求められたと感じさせる言い方\
+（命令、呼びかけ、問いかけ）は避けます。
+
+語尾は決まった型にせず、その文の内容から自然に出てくる形にしてください。毎晩届く欄なので、\
+いつも同じ言い回しで終わると飽きられます。
+
+誰でも思いつく無難な内容（「大切にしよう」「感謝しよう」など）ではなく、その日ならではの具体的な一言にします。\
+「今年で○年目」のような年数の計算や、新しい数字・事実はここにも書きません。
+
+出力は本文の2行だけにしてください。見出し、前置き、挨拶、絵文字は付けません。"""
 
 
-def generate_comment(date_label: str, forecasts: list[dict]) -> Optional[str]:
-    """明日の日付と各都市の予報から、通知に添える一言を生成する。"""
+def fetch_day_material(target_date: date) -> Optional[str]:
+    """日本語版ウィキペディアの日付ページから、記念日とできごとの節を取り出す。"""
+    params = {
+        "action": "query",
+        "prop": "extracts",
+        "explaintext": 1,
+        "titles": f"{target_date.month}月{target_date.day}日",
+        "redirects": 1,
+        "format": "json",
+        "formatversion": 2,
+    }
+    req = urllib.request.Request(
+        f"{WIKIPEDIA_API_URL}?{urllib.parse.urlencode(params)}",
+        headers={"User-Agent": USER_AGENT},
+    )
+    with urllib.request.urlopen(req, timeout=15) as res:
+        data = json.loads(res.read().decode("utf-8"))
+    text = data["query"]["pages"][0].get("extract") or ""
+
+    # "== 見出し ==" で区切って {見出し: 本文} にする
+    parts = re.split(r"\n== (.+?) ==\n", "\n" + text)
+    sections = dict(zip(parts[1::2], parts[2::2]))
+
+    blocks = []
+    for name, limit in SECTIONS.items():
+        body = sections.get(name, "").strip()
+        if body:
+            blocks.append(f"## {name}\n{body[:limit]}")
+    return "\n\n".join(blocks) or None
+
+
+def generate_tomorrow_note(target_date: date) -> Optional[str]:
+    """target_date（明日）が何の日かを紹介する短い文を生成する。"""
     claude = shutil.which("claude")
     if not claude:
         return None
 
-    payload = {
-        "明日": date_label,
-        "予報": [
-            {
-                "都市": f["name"],
-                "天気": f["weather"],
-                "最高気温": round(f["temp_max"]),
-                "最低気温": round(f["temp_min"]),
-                "降水確率": f["precip_prob"],
-            }
-            for f in forecasts
-        ],
-    }
-
     try:
+        material = fetch_day_material(target_date)
+        if not material:
+            raise RuntimeError("no material on Wikipedia")
+        prompt = f"明日は{target_date.month}月{target_date.day}日です。\n\n{material}"
+
         # 文章を1つ書くだけなので、ツール・スキル・プロジェクト設定は使わせない
         with tempfile.TemporaryDirectory() as workdir:
             result = subprocess.run(
                 [
-                    claude, "-p", json.dumps(payload, ensure_ascii=False),
+                    claude, "-p", prompt,
                     "--system-prompt", SYSTEM_PROMPT,
                     "--model", MODEL,
                     "--tools", "",
@@ -61,6 +111,8 @@ def generate_comment(date_label: str, forecasts: list[dict]) -> Optional[str]:
                     "--no-session-persistence",
                 ],
                 cwd=workdir,
+                # 標準入力がつながっていると、claude がその中身までプロンプトとして読んでしまう
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=TIMEOUT_SECONDS,
@@ -70,6 +122,6 @@ def generate_comment(date_label: str, forecasts: list[dict]) -> Optional[str]:
             raise RuntimeError(f"claude exit={result.returncode} {detail}")
         return result.stdout.strip() or None
     except Exception as e:
-        # 一言は添え物なので、失敗しても配信は止めない
+        # この欄は添え物なので、失敗しても配信は止めない
         print(f"[comment] failed err={e}", file=sys.stderr)
         return None

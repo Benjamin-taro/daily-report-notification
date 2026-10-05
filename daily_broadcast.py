@@ -5,9 +5,9 @@ import uuid
 from datetime import date, datetime, timezone, timedelta
 from zoneinfo import ZoneInfo  # Python 3.9+
 
-from comment import generate_comment
+from comment import generate_tomorrow_note
 from line_client import LineClient, build_text_message
-from tz import WEEKDAY_JA, format_date_ja
+from tz import WEEKDAY_JA
 from weather import get_daily_forecasts
 
 # ===============================
@@ -73,11 +73,11 @@ def build_message() -> dict:
     ]
     if forecasts:
         sections.append(format_forecast_block(forecasts))
-        comment = generate_comment(format_date_ja(target_date), forecasts)
-        if comment:
-            sections.append(comment)
     else:
         sections.append("（天気情報の取得に失敗しました🙏）")
+    note = generate_tomorrow_note(target_date)
+    if note:
+        sections.append(f"📅 明日は何の日\n{note}")
     sections.append("✍️ 今日の日報を投稿しましょう！")
 
     return build_text_message("\n\n".join(sections))
